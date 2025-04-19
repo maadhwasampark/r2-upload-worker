@@ -1,25 +1,35 @@
-// index.ts
-
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    if (request.method !== "POST") {
-      return new Response("Only POST allowed", { status: 405 });
+  async fetch(request: Request): Promise<Response> {
+    if (request.method !== "PUT") {
+      return new Response("Only PUT requests are allowed", { status: 405 });
     }
 
-    const { filename, contentType, fileBase64 } = await request.json();
-    const body = Uint8Array.from(atob(fileBase64), c => c.charCodeAt(0));
+    const url = new URL(request.url);
+    const objectKey = url.searchParams.get("filename");
+    if (!objectKey) {
+      return new Response("Missing filename", { status: 400 });
+    }
 
-    const url = `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${env.R2_BUCKET}/${filename}`;
-    const now = new Date();
-    const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '') + 'Z';
-    const dateStamp = amzDate.substring(0, 8);
+    const accountId = R2_ACCOUNT_ID;
+    const bucket = R2_BUCKET;
+    const accessKeyId = R2_ACCESS_KEY;
+    const secretAccessKey = R2_SECRET_KEY;
 
-    const region = "auto"; // works for APAC
+    const endpoint = `https://${accountId}.r2.cloudflarestorage.com`;
+    const targetUrl = `${endpoint}/${bucket}/${objectKey}`;
+
+    // Get the body of the incoming PUT request
+    const body = await request.arrayBuffer();
+
+    // Generate the required headers
+    const now = new Date().toISOString().replace(/[:-]|\.\d{3}/g, "");
+    const datestamp = now.slice(0, 8);
+    const amzDate = now;
+
+    const region = "auto";
     const service = "s3";
-    const algorithm = "AWS4-HMAC-SHA256";
-    const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
-
-    const host = `${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
+    const host = `${accountId}.r2.cloudflarestorage.com`;
+    const credentialScope = `${datestamp}/${region}/${service}/aws4_request`;
 
     const headers = {
       "host": host,
@@ -27,68 +37,76 @@ export default {
       "x-amz-content-sha256": await hashHex(body),
     };
 
-    const canonicalHeaders = Object.entries(headers)
-      .map(([k, v]) => `${k}:${v}\n`).join('');
-    const signedHeaders = Object.keys(headers).sort().join(';');
+    const signedHeaders = Object.keys(headers).sort().join(";");
 
     const canonicalRequest = [
       "PUT",
-      `/${env.R2_BUCKET}/${filename}`,
+      `/${bucket}/${objectKey}`,
       "",
-      canonicalHeaders,
+      Object.entries(headers).sort().map(([k, v]) => `${k}:${v}`).join("\n") + "\n",
       signedHeaders,
       headers["x-amz-content-sha256"]
-    ].join('\n');
+    ].join("\n");
 
     const stringToSign = [
-      algorithm,
+      "AWS4-HMAC-SHA256",
       amzDate,
       credentialScope,
-      await hashHex(canonicalRequest)
-    ].join('\n');
+      await hashHex(canonicalRequest),
+    ].join("\n");
 
-    const signingKey = await getSignatureKey(env.R2_SECRET_KEY, dateStamp, region, service);
+    const signingKey = await getSignatureKey(secretAccessKey, datestamp, region, service);
     const signature = await hmacHex(signingKey, stringToSign);
 
-    const authorizationHeader = `${algorithm} Credential=${env.R2_ACCESS_KEY}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+    const authHeader = `AWS4-HMAC-SHA256 Credential=${accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
 
-    const res = await fetch(url, {
+    // Final headers to send to R2
+    const r2Headers = new Headers(headers);
+    r2Headers.set("Authorization", authHeader);
+
+    // Perform the actual upload
+    const uploadRes = await fetch(targetUrl, {
       method: "PUT",
-      headers: {
-        ...headers,
-        "Authorization": authorizationHeader,
-        "Content-Type": contentType
-      },
-      body
+      headers: r2Headers,
+      body: body,
     });
 
-    if (!res.ok) {
-      const err = await res.text();
-      return new Response(`Upload failed:\n${err}`, { status: 500 });
+    if (!uploadRes.ok) {
+      return new Response("Upload failed: " + (await uploadRes.text()), { status: 500 });
     }
 
-    return new Response(JSON.stringify({ url }), {
-      headers: { "Content-Type": "application/json" }
-    });
-  }
+    return new Response("Uploaded!", { status: 200 });
+  },
 };
 
-async function hmac(key, msg) {
+// Helpers
+async function hashHex(data: ArrayBuffer | string) {
   const enc = new TextEncoder();
-  return await crypto.subtle.sign("HMAC", await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]), enc.encode(msg));
+  const buffer = typeof data === "string" ? enc.encode(data) : new Uint8Array(data);
+  const hash = await crypto.subtle.digest("SHA-256", buffer);
+  return [...new Uint8Array(hash)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
-async function hmacHex(key, msg) {
-  const sig = await hmac(key, msg);
+
+async function hmac(key: CryptoKey, msg: string) {
+  const enc = new TextEncoder().encode(msg);
+  return crypto.subtle.sign("HMAC", key, enc);
+}
+
+async function getKey(key: ArrayBuffer) {
+  return crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+}
+
+async function hmacHex(key: ArrayBuffer, msg: string) {
+  const cryptoKey = await getKey(key);
+  const sig = await hmac(cryptoKey, msg);
   return [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
-async function hashHex(msg) {
-  const digest = await crypto.subtle.digest("SHA-256", msg);
-  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
-}
-async function getSignatureKey(key, dateStamp, regionName, serviceName) {
-  const kDate = await hmac(new TextEncoder().encode("AWS4" + key), dateStamp);
-  const kRegion = await hmac(kDate, regionName);
-  const kService = await hmac(kRegion, serviceName);
-  const kSigning = await hmac(kService, "aws4_request");
+
+async function getSignatureKey(key: string, date: string, region: string, service: string) {
+  const enc = new TextEncoder();
+  const kDate = await hmac(await getKey(enc.encode("AWS4" + key)), date);
+  const kRegion = await hmac(await getKey(kDate), region);
+  const kService = await hmac(await getKey(kRegion), service);
+  const kSigning = await hmac(await getKey(kService), "aws4_request");
   return kSigning;
 }
