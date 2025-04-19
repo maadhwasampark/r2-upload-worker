@@ -1,0 +1,9 @@
+name = "r2-upload-worker"
+main = "index.ts"
+compatibility_date = "2025-04-18"
+
+[vars]
+R2_ACCOUNT_ID = "ad8a5598e87178bcb32714f8998017d3"
+R2_BUCKET = "matrimonial-photos"
+R2_ACCESS_KEY = "2e9799e6d6e86d922136aa29ce702451"
+R2_SECRET_KEY = "ffc82b4b9a5f23a86966dd5a210da2934ab7bf15d2e8777c1488c716af157bb8"
