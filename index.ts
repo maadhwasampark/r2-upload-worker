@@ -4,11 +4,13 @@ export default {
       return new Response("Only PUT requests are allowed", { status: 405 });
     }
 
-    const url = new URL(request.url);
-    const objectKey = url.searchParams.get("filename");
-    if (!objectKey) {
-      return new Response("Missing filename", { status: 400 });
-    }
+    const matches = url.pathname.match(/^\/upload\/(.+)$/);
+const objectKey = matches?.[1];
+
+if (!objectKey) {
+  return new Response("Missing filename", { status: 400 });
+}
+
 
     const accountId = R2_ACCOUNT_ID;
     const bucket = R2_BUCKET;
