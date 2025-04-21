@@ -1,5 +1,5 @@
 name = "r2-upload-worker"
-main = "index.js"
+main = "index.ts"
 compatibility_date = "2024-04-20"
 
 [[r2_buckets]]
